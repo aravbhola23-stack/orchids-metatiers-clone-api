@@ -39,3 +39,354 @@ data: [DONE]
   response: {"authenticated":false,"message":"Error: stdout is not a terminal"}
 2026-02-24T14:55:30.932Z [console][log] [HMR] connected
 2026-02-24T14:55:40.102Z [console][error] {}
+2026-02-25T09:13:35.157Z [console][error] ./src/app/page.tsx
+Error:   x Unexpected eof
+     ,-[/home/user/app/src/app/page.tsx:730:1]
+ 727 |     } catch {
+ 728 |       setCodexStatus("Could not disconnect Codex.");
+ 729 |     } finally {
+ 730 |       setCodexLoading(fal
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T09:13:36.162Z [console][error] ./src/app/page.tsx
+Error:   x Unexpected token `div`. Expected jsx identifier
+     ,-[/home/user/app/src/app/page.tsx:965:1]
+ 962 |   };
+ 963 | 
+ 964 |         return (
+ 965 |           <div style={{ height: "100dvh", overflow: "hidden", background: T.bg, color: T.text, fontFamily: "'Inter', system-ui, sans-serif", display: "flex", minHeight: 0 }}>
+     :            ^^^
+ 966 | 
+ 967 | 
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T09:13:53.441Z [console][error] ./src/app/page.tsx
+Error:   x Unexpected eof
+     ,-[/home/user/app/src/app/page.tsx:732:1]
+ 729 |       const res = await fetch("/api/codex/disconnect", { method: "POST" });
+ 730 |       const data = await res.json() as { ok?: boolean; message?: string };
+ 731 |       if (!res.ok || !data.ok) {
+ 732 |         setCodexStatus(str
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T09:14:07.444Z [console][error] ./src/app/page.tsx
+Error:   x Unexpected eof
+     ,-[/home/user/app/src/app/page.tsx:732:1]
+ 729 |       const res = await fetch("/api/codex/disconnect", { method: "POST" });
+ 730 |       const data = await res.json() as { ok?: boolean; message?: string };
+ 731 |       if (!res.ok || !data.ok) {
+ 732 |         setCodexStatus(str
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T09:14:08.547Z [console][error] ./src/app/page.tsx
+Error:   x Expected '}', got '<eof>'
+     ,-[/home/user/app/src/app/page.tsx:737:1]
+ 734 |       }
+ 735 |       setCodexAuthed(false);
+ 736 |       setCodexCode("");
+ 737 |       setCod
+     :       ^^^^^^
+     `----
+  x Expected a semicolon
+     ,-[/home/user/app/src/app/page.tsx:737:1]
+ 734 |       }
+ 735 |       setCodexAuthed(false);
+ 736 |       setCodexCode("");
+ 737 |       setCod
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T09:15:43.011Z [console][error] ./src/app/page.tsx
+Error:   x Unexpected token `div`. Expected jsx identifier
+     ,-[/home/user/app/src/app/page.tsx:995:1]
+ 992 |   };
+ 993 | 
+ 994 |         return (
+ 995 |           <div style={{ height: "100dvh", overflow: "hidden", background: T.bg, color: T.text, fontFamily: "'Inter', system-ui, sans-serif", display: "flex", minHeight: 0 }}>
+     :            ^^^
+ 996 | 
+ 997 | 
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T09:13:35.157Z [console][error] ./src/app/page.tsx
+Error:   x Unexpected eof
+     ,-[/home/user/app/src/app/page.tsx:730:1]
+ 727 |     } catch {
+ 728 |       setCodexStatus("Could not disconnect Codex.");
+ 729 |     } finally {
+ 730 |       setCodexLoading(fal
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T09:13:36.162Z [console][error] ./src/app/page.tsx
+Error:   x Unexpected token `div`. Expected jsx identifier
+     ,-[/home/user/app/src/app/page.tsx:965:1]
+ 962 |   };
+ 963 | 
+ 964 |         return (
+ 965 |           <div style={{ height: "100dvh", overflow: "hidden", background: T.bg, color: T.text, fontFamily: "'Inter', system-ui, sans-serif", display: "flex", minHeight: 0 }}>
+     :            ^^^
+ 966 | 
+ 967 | 
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T09:13:53.441Z [console][error] ./src/app/page.tsx
+Error:   x Unexpected eof
+     ,-[/home/user/app/src/app/page.tsx:732:1]
+ 729 |       const res = await fetch("/api/codex/disconnect", { method: "POST" });
+ 730 |       const data = await res.json() as { ok?: boolean; message?: string };
+ 731 |       if (!res.ok || !data.ok) {
+ 732 |         setCodexStatus(str
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T09:14:07.444Z [console][error] ./src/app/page.tsx
+Error:   x Unexpected eof
+     ,-[/home/user/app/src/app/page.tsx:732:1]
+ 729 |       const res = await fetch("/api/codex/disconnect", { method: "POST" });
+ 730 |       const data = await res.json() as { ok?: boolean; message?: string };
+ 731 |       if (!res.ok || !data.ok) {
+ 732 |         setCodexStatus(str
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T09:14:08.547Z [console][error] ./src/app/page.tsx
+Error:   x Expected '}', got '<eof>'
+     ,-[/home/user/app/src/app/page.tsx:737:1]
+ 734 |       }
+ 735 |       setCodexAuthed(false);
+ 736 |       setCodexCode("");
+ 737 |       setCod
+     :       ^^^^^^
+     `----
+  x Expected a semicolon
+     ,-[/home/user/app/src/app/page.tsx:737:1]
+ 734 |       }
+ 735 |       setCodexAuthed(false);
+ 736 |       setCodexCode("");
+ 737 |       setCod
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T09:15:43.011Z [console][error] ./src/app/page.tsx
+Error:   x Unexpected token `div`. Expected jsx identifier
+     ,-[/home/user/app/src/app/page.tsx:995:1]
+ 992 |   };
+ 993 | 
+ 994 |         return (
+ 995 |           <div style={{ height: "100dvh", overflow: "hidden", background: T.bg, color: T.text, fontFamily: "'Inter', system-ui, sans-serif", display: "flex", minHeight: 0 }}>
+     :            ^^^
+ 996 | 
+ 997 | 
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T09:58:13.413Z [console][error] ./src/app/page.tsx
+Error:   x Unexpected eof
+     ,-[/home/user/app/src/app/page.tsx:727:1]
+ 724 |         setCodexStatus(stripAnsi(data.message || "Not authenticated."));
+ 725 |       }
+ 726 |     } catch {
+ 727 |       if (!opts
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T12:12:54.796Z [console][error] ./src/app/page.tsx
+Error:   x Expected '}', got '<eof>'
+     ,-[/home/user/app/src/app/page.tsx:727:1]
+ 724 |       if (!opts?.silentIfNotAuthed || data.code) {
+ 725 |         setCodexStatus(stripAnsi(data.message || "Not authenticated."));
+ 726 |       }
+ 727 |     } catch {
+     :             ^
+ 728 |  
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T12:13:47.663Z [console][error] ./src/app/page.tsx
+Error:   x Expected '}', got '<eof>'
+     ,-[/home/user/app/src/app/page.tsx:727:1]
+ 724 |       if (!opts?.silentIfNotAuthed || data.code) {
+ 725 |         setCodexStatus(stripAnsi(data.message || "Not authenticated."));
+ 726 |       }
+ 727 |     } catch {
+     :             ^
+ 728 |  
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T12:13:48.663Z [console][error] ./src/app/page.tsx
+Error:   x Unterminated string constant
+     ,-[/home/user/app/src/app/page.tsx:729:1]
+ 726 |       }
+ 727 |     } catch {
+ 728 |       if (!opts?.silentIfNotAuthed) {
+ 729 |         setCodexStatus("Cannot reach backend. UI runs on :3000 and proxies Codex status to the configured Py
+     :                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     `----
+  x Unexpected eof
+     ,-[/home/user/app/src/app/page.tsx:729:1]
+ 726 |       }
+ 727 |     } catch {
+ 728 |       if (!opts?.silentIfNotAuthed) {
+ 729 |         setCodexStatus("Cannot reach backend. UI runs on :3000 and proxies Codex status to the configured Py
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T12:14:24.534Z [console][error] ./src/app/page.tsx
+Error:   x Expected '}', got '<eof>'
+     ,-[/home/user/app/src/app/page.tsx:727:1]
+ 724 |       if (!opts?.silentIfNotAuthed || data.code) {
+ 725 |         setCodexStatus(stripAnsi(data.message || "Not authenticated."));
+ 726 |       }
+ 727 |     } catch {
+     :             ^
+ 728 |  
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T12:14:41.342Z [console][error] ./src/app/page.tsx
+Error:   x Unexpected token `div`. Expected jsx identifier
+      ,-[/home/user/app/src/app/page.tsx:1001:1]
+  998 |   };
+  999 | 
+ 1000 |         return (
+ 1001 |           <div style={{ height: "100dvh", overflow: "hidden", background: `radial-gradient(circle at top right, ${isDark ? "rgba(148,163,184,0.26)" : "rgba(148,163,184,0.3)"}, transparent 34%), radial-gradient(circle at 16% 8%, ${isDark ? "rgba(203,213,225,0.16)" : "rgba(148,163,184,0.14)"}, transparent 38%), linear-gradient(180deg, ${T.bg} 0%, ${isDark ? "#070a10" : "#e8edf6"} 100%)`, color: T.text, fontFamily: "'Inter', system-ui, sans-serif", display: "flex", minHeight: 0 }}>
+      :            ^^^
+ 1002 | 
+ 1003 | 
+      `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T12:15:11.191Z [console][error] ./src/app/page.tsx
+Error:   x Expected '}', got '<eof>'
+     ,-[/home/user/app/src/app/page.tsx:727:1]
+ 724 |       if (!opts?.silentIfNotAuthed || data.code) {
+ 725 |         setCodexStatus(stripAnsi(data.message || "Not authenticated."));
+ 726 |       }
+ 727 |     } catch {
+     :             ^
+ 728 |  
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T12:15:32.561Z [console][error] ./src/app/page.tsx
+Error:   x Expected '}', got '<eof>'
+     ,-[/home/user/app/src/app/page.tsx:727:1]
+ 724 |       if (!opts?.silentIfNotAuthed || data.code) {
+ 725 |         setCodexStatus(stripAnsi(data.message || "Not authenticated."));
+ 726 |       }
+ 727 |     } catch {
+     :             ^
+ 728 |  
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx
+2026-02-25T12:15:33.633Z [console][error] ./src/app/page.tsx
+Error:   x Unterminated string constant
+     ,-[/home/user/app/src/app/page.tsx:816:1]
+ 813 |       const selectedProvider: ModelProvider = "openrouter";
+ 814 |       const response = await fetch(backendUrl, {
+ 815 |         method: "POST",
+ 816 |         headers: { "Content-Type": "application/jso
+     :                                    ^^^^^^^^^^^^^^^^
+     `----
+  x Unexpected eof
+     ,-[/home/user/app/src/app/page.tsx:816:1]
+ 813 |       const selectedProvider: ModelProvider = "openrouter";
+ 814 |       const response = await fetch(backendUrl, {
+ 815 |         method: "POST",
+ 816 |         headers: { "Content-Type": "application/jso
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/app/page.tsx

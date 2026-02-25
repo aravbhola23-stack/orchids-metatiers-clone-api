@@ -6,12 +6,64 @@ import json
 import os
 import re
 import shlex
+import subprocess
+import shutil
 import time
 import zipfile
 from io import BytesIO
 from pathlib import Path
 import tempfile
 from typing import Any
+import sys
+import io
+
+# ==========================================
+# CRITICAL: ASCII ENCODING CRASH FIX
+# ==========================================
+# Force UTF-8 regardless of host terminal locale to prevent
+# UnicodeEncodeError (for example with symbols like '\u25cf').
+os.environ["PYTHONIOENCODING"] = "utf-8"
+os.environ["PYTHONUTF8"] = "1"
+os.environ["LANG"] = "C.UTF-8"
+os.environ["LC_ALL"] = "C.UTF-8"
+
+# Re-wrap stdout/stderr with UTF-8 safely when possible.
+def _ensure_utf8_stdio() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None:
+            continue
+
+        # Prefer reconfigure when available (works for normal TextIO streams).
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+                continue
+            except Exception:
+                pass
+
+        encoding = (getattr(stream, "encoding", "") or "").lower()
+        if encoding == "utf-8":
+            continue
+        buffer = getattr(stream, "buffer", None)
+        if buffer is None:
+            continue
+        try:
+            setattr(sys, stream_name, io.TextIOWrapper(buffer, encoding="utf-8", errors="replace"))
+        except Exception:
+            # Keep original stream if wrapping fails in constrained runtimes.
+            continue
+
+
+def _ascii_safe(text: str) -> str:
+    # Codex CLI output can contain unicode glyphs; normalize to ASCII for stability
+    # in restrictive terminal/runtime environments.
+    return text.encode("ascii", "replace").decode("ascii")
+
+
+_ensure_utf8_stdio()
+# ==========================================
 
 import httpx
 from fastapi import FastAPI
@@ -38,15 +90,29 @@ MODEL_CACHE: dict[str, Any] = {"fetched_at": 0.0, "models": []}
 DEPLOYMENTS_DIR = Path(os.getenv("DEPLOYMENTS_DIR", "/tmp/universal-ai-ide-deployments"))
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 ANSI_ORPHAN_RE = re.compile(r"\[[0-9;]*m")
-CODEX_DEVICE_AUTH_COOLDOWN_SECONDS = int(os.getenv("CODEX_DEVICE_AUTH_COOLDOWN_SECONDS", "60"))
-CODEX_DEVICE_AUTH_COOLDOWN_UNTIL = 0.0
-
+CODEX_VERIFICATION_URL = "https://auth.openai.com/codex/device"
+CODEX_CODE_TTL_SECONDS = 600
+CODEX_MIN_RETRY_SECONDS = 5
+CODEX_DEVICE_CODE_RE = re.compile(r"\b([A-Z0-9]{4})[^A-Z0-9\r\n]{0,3}([A-Z0-9]{5})\b")
+CODEX_DEVICE_CODE_SPLIT_RE = re.compile(r"\b([A-Z0-9](?:[^A-Z0-9\r\n]+[A-Z0-9]){8})\b")
+CODEX_VERIFICATION_URL_RE = re.compile(r"https://auth\.openai\.com/codex/device")
+CODEX_AUTH_COMMAND_CANDIDATES: list[list[str]] = [
+    ["codex", "login", "--device-auth"],
+    ["codex", "login"],
+]
+CODEX_AUTH_STATE: dict[str, Any] = {
+    "authenticated": False,
+    "message": "Not authenticated.",
+    "code": None,
+    "verification_url": CODEX_VERIFICATION_URL,
+    "code_expires_at": 0.0,
+    "next_start_allowed_at": 0.0,
+}
 
 class ChatAttachment(BaseModel):
     name: str = Field(min_length=1)
     mime_type: str = Field(min_length=1)
     data_base64: str = Field(min_length=1)
-
 
 class ChatPayload(BaseModel):
     message: str = Field(min_length=1)
@@ -58,13 +124,10 @@ class ChatPayload(BaseModel):
     attachments: list[ChatAttachment] = Field(default_factory=list)
 
 
-class CodexCommandResult(BaseModel):
-    authenticated: bool
-    code: str | None = None
-    verification_url: str | None = None
-    output: str | None = None
-    retry_after_seconds: int | None = None
-
+class RecommendPayload(BaseModel):
+    message: str = Field(min_length=1)
+    candidates: list[str] = Field(default_factory=list)
+    api_key: str | None = None
 
 def build_system_prompt(vfs: dict[str, str], custom_system_prompt: str | None = None) -> str:
     base_prompt = (
@@ -74,244 +137,315 @@ def build_system_prompt(vfs: dict[str, str], custom_system_prompt: str | None = 
     )
     if custom_system_prompt:
         base_prompt = f"{base_prompt}\n\nUser system prompt:\n{custom_system_prompt.strip()}"
-
-    return (
-        f"{base_prompt}\n\n"
-        "Current project files:\n"
-        f"{json.dumps(vfs, indent=2)}"
-    )
-
+    return f"{base_prompt}\n\nCurrent project files:\n{json.dumps(vfs, indent=2)}"
 
 def build_user_message(payload: ChatPayload) -> str | list[dict[str, Any]]:
     if not payload.attachments:
         return payload.message
-
     content: list[dict[str, Any]] = [{"type": "text", "text": payload.message}]
     for attachment in payload.attachments:
-        if not attachment.mime_type.startswith("image/"):
-            continue
-        content.append(
-            {
+        if attachment.mime_type.startswith("image/"):
+            content.append({
                 "type": "image_url",
-                "image_url": {
-                    "url": f"data:{attachment.mime_type};base64,{attachment.data_base64}"
-                },
-            }
-        )
+                "image_url": {"url": f"data:{attachment.mime_type};base64,{attachment.data_base64}"},
+            })
     return content
 
 
+def _normalize_codex_code(raw_code: str) -> str | None:
+    alnum = "".join(ch for ch in raw_code.upper() if ch.isalnum())
+    if len(alnum) != 9:
+        return None
+    if alnum == "AUTHUSAGE":
+        return None
+    return f"{alnum[:4]}-{alnum[4:]}"
+
+
+def _extract_codex_device_code(output: str) -> str | None:
+    upper = output.upper()
+
+    # Preferred format from CLI output: 4 chars + separator + 5 chars.
+    match = CODEX_DEVICE_CODE_RE.search(upper)
+    if match:
+        normalized = _normalize_codex_code(f"{match.group(1)}{match.group(2)}")
+        if normalized:
+            return normalized
+
+    # Fallback for split rendering like one-char-per-line (Y\nI\nR\n7...).
+    split_match = CODEX_DEVICE_CODE_SPLIT_RE.search(upper)
+    if split_match:
+        normalized = _normalize_codex_code(split_match.group(1))
+        if normalized:
+            return normalized
+
+    return None
+
+
+def _extract_codex_verification_url(output: str) -> str | None:
+    match = CODEX_VERIFICATION_URL_RE.search(output)
+    if not match:
+        return None
+    return match.group(0)
+
+
+def _codex_is_logged_in() -> bool:
+    codex_bin = shutil.which("codex")
+    if not codex_bin:
+        return False
+    try:
+        proc = subprocess.run(
+            ["codex", "login", "status"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                **os.environ,
+                "PYTHONIOENCODING": "utf-8",
+                "PYTHONUTF8": "1",
+                "LANG": os.environ.get("LANG", "C.UTF-8"),
+                "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+            },
+        )
+    except Exception:
+        return False
+
+    output = f"{proc.stdout}\n{proc.stderr}".strip().lower()
+    return proc.returncode == 0 and "logged in" in output
+
+
+def _run_codex_device_login() -> tuple[str | None, str, str | None, int | None]:
+    codex_bin = shutil.which("codex")
+    if not codex_bin:
+        return None, "Codex CLI is not installed on backend server. Install Codex CLI first.", None, None
+
+    if _codex_is_logged_in():
+        CODEX_AUTH_STATE["authenticated"] = True
+        CODEX_AUTH_STATE["message"] = "Connected"
+        CODEX_AUTH_STATE["code"] = None
+        CODEX_AUTH_STATE["code_expires_at"] = 0.0
+        CODEX_AUTH_STATE["verification_url"] = CODEX_VERIFICATION_URL
+        return None, "Already connected.", CODEX_VERIFICATION_URL, 0
+
+    last_output = ""
+    for cmd in CODEX_AUTH_COMMAND_CANDIDATES:
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env={
+                    **os.environ,
+                    "PYTHONIOENCODING": "utf-8",
+                    "PYTHONUTF8": "1",
+                    "LANG": os.environ.get("LANG", "C.UTF-8"),
+                    "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+                },
+            )
+        except FileNotFoundError:
+            return None, "Codex CLI binary not found in PATH.", None, None
+        except subprocess.TimeoutExpired as exc:
+            combined = f"{exc.stdout or ''}\n{exc.stderr or ''}".strip()
+            code = _extract_codex_device_code(combined)
+            if code:
+                verification_url = _extract_codex_verification_url(combined) or CODEX_VERIFICATION_URL
+                return code, "Open the verification URL and enter the code.", verification_url, None
+            if _codex_is_logged_in():
+                CODEX_AUTH_STATE["authenticated"] = True
+                CODEX_AUTH_STATE["message"] = "Connected"
+                CODEX_AUTH_STATE["code"] = None
+                CODEX_AUTH_STATE["code_expires_at"] = 0.0
+                return None, "Already connected.", CODEX_VERIFICATION_URL, 0
+            return None, "Timed out while starting Codex device auth. Try again.", None, None
+
+        combined_output = f"{proc.stdout}\n{proc.stderr}".strip()
+        cleaned_output = ANSI_ORPHAN_RE.sub("", ANSI_ESCAPE_RE.sub("", combined_output)).strip()
+        cleaned_output = _ascii_safe(cleaned_output)
+        if cleaned_output:
+            last_output = cleaned_output
+
+        code = _extract_codex_device_code(cleaned_output)
+        if code:
+            verification_url = _extract_codex_verification_url(cleaned_output) or CODEX_VERIFICATION_URL
+            return code, "Open the verification URL and enter the code.", verification_url, proc.returncode
+
+        if _codex_is_logged_in():
+            CODEX_AUTH_STATE["authenticated"] = True
+            CODEX_AUTH_STATE["message"] = "Connected"
+            CODEX_AUTH_STATE["code"] = None
+            CODEX_AUTH_STATE["code_expires_at"] = 0.0
+            return None, "Already connected.", CODEX_VERIFICATION_URL, proc.returncode
+
+    if last_output:
+        return None, f"Codex CLI did not return a device code. Output: {last_output}", None, None
+    return None, "Codex CLI did not return a device code.", None, None
+
+
+def _codex_refresh_state_if_expired() -> None:
+    expires_at = float(CODEX_AUTH_STATE.get("code_expires_at") or 0.0)
+    if CODEX_AUTH_STATE.get("code") and expires_at and time.time() >= expires_at:
+        CODEX_AUTH_STATE["code"] = None
+        CODEX_AUTH_STATE["code_expires_at"] = 0.0
+        if not CODEX_AUTH_STATE.get("authenticated"):
+            CODEX_AUTH_STATE["message"] = "Not authenticated."
+
+
+def _codex_retry_after_seconds() -> int:
+    now = time.time()
+    allowed_at = float(CODEX_AUTH_STATE.get("next_start_allowed_at") or 0.0)
+    if allowed_at <= now:
+        return 0
+    return max(1, int(allowed_at - now))
+
+
+def _codex_status_payload() -> dict[str, Any]:
+    _codex_refresh_state_if_expired()
+
+    # Keep state aligned with CLI session in case login happened in terminal.
+    if not CODEX_AUTH_STATE.get("authenticated") and _codex_is_logged_in():
+        CODEX_AUTH_STATE["authenticated"] = True
+        CODEX_AUTH_STATE["message"] = "Connected"
+        CODEX_AUTH_STATE["code"] = None
+        CODEX_AUTH_STATE["code_expires_at"] = 0.0
+        CODEX_AUTH_STATE["verification_url"] = CODEX_VERIFICATION_URL
+
+    payload: dict[str, Any] = {
+        "authenticated": bool(CODEX_AUTH_STATE.get("authenticated")),
+        "message": str(CODEX_AUTH_STATE.get("message") or ""),
+        "verification_url": str(CODEX_AUTH_STATE.get("verification_url") or CODEX_VERIFICATION_URL),
+    }
+    code = _normalize_codex_code(str(CODEX_AUTH_STATE.get("code") or ""))
+    if code:
+        CODEX_AUTH_STATE["code"] = code
+        payload["code"] = code
+    else:
+        CODEX_AUTH_STATE["code"] = None
+    return payload
+
+
+def _codex_start_payload() -> dict[str, Any]:
+    _codex_refresh_state_if_expired()
+    retry_after = _codex_retry_after_seconds()
+    if retry_after > 0:
+        return {
+            "authenticated": bool(CODEX_AUTH_STATE.get("authenticated")),
+            "code": CODEX_AUTH_STATE.get("code"),
+            "verification_url": str(CODEX_AUTH_STATE.get("verification_url") or CODEX_VERIFICATION_URL),
+            "output": f"Rate limited. Retry in {retry_after}s.",
+            "retry_after_seconds": retry_after,
+        }
+
+    if CODEX_AUTH_STATE.get("authenticated"):
+        return {
+            "authenticated": True,
+            "code": None,
+            "verification_url": str(CODEX_AUTH_STATE.get("verification_url") or CODEX_VERIFICATION_URL),
+            "output": "Already connected.",
+            "retry_after_seconds": None,
+        }
+
+    code, output_message, verification_url, _ = _run_codex_device_login()
+    now = time.time()
+    CODEX_AUTH_STATE["next_start_allowed_at"] = now + CODEX_MIN_RETRY_SECONDS
+
+    if CODEX_AUTH_STATE.get("authenticated"):
+        CODEX_AUTH_STATE["code"] = None
+        CODEX_AUTH_STATE["code_expires_at"] = 0.0
+        CODEX_AUTH_STATE["message"] = "Connected"
+        CODEX_AUTH_STATE["verification_url"] = verification_url or CODEX_VERIFICATION_URL
+        return {
+            "authenticated": True,
+            "code": None,
+            "verification_url": CODEX_AUTH_STATE["verification_url"],
+            "output": output_message or "Already connected.",
+            "retry_after_seconds": None,
+        }
+
+    normalized_code = _normalize_codex_code(str(code or ""))
+    if not normalized_code:
+        CODEX_AUTH_STATE["code"] = None
+        CODEX_AUTH_STATE["code_expires_at"] = 0.0
+        CODEX_AUTH_STATE["message"] = output_message
+        CODEX_AUTH_STATE["verification_url"] = verification_url or CODEX_VERIFICATION_URL
+        return {
+            "authenticated": False,
+            "code": None,
+            "verification_url": CODEX_AUTH_STATE["verification_url"],
+            "output": output_message,
+            "retry_after_seconds": None,
+        }
+
+    CODEX_AUTH_STATE["code"] = normalized_code
+    CODEX_AUTH_STATE["code_expires_at"] = now + CODEX_CODE_TTL_SECONDS
+    CODEX_AUTH_STATE["message"] = "Awaiting device verification."
+    CODEX_AUTH_STATE["verification_url"] = verification_url or CODEX_VERIFICATION_URL
+
+    return {
+        "authenticated": False,
+        "code": normalized_code,
+        "verification_url": CODEX_AUTH_STATE["verification_url"],
+        "output": "Open the verification URL and enter the code.",
+        "retry_after_seconds": None,
+    }
+
 async def get_openrouter_models(api_key: str) -> list[dict[str, Any]]:
     now = time.time()
-    cached_models = MODEL_CACHE.get("models", [])
-    fetched_at = float(MODEL_CACHE.get("fetched_at", 0.0))
-    if cached_models and (now - fetched_at) < MODEL_CACHE_TTL_SECONDS:
-        return cached_models
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "HTTP-Referer": DEFAULT_REFERER,
-        "X-Title": DEFAULT_TITLE,
-    }
-    timeout = httpx.Timeout(connect=20.0, read=40.0, write=20.0, pool=20.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    if MODEL_CACHE["models"] and (now - MODEL_CACHE["fetched_at"]) < MODEL_CACHE_TTL_SECONDS:
+        return MODEL_CACHE["models"]
+    headers = {"Authorization": f"Bearer {api_key}", "HTTP-Referer": DEFAULT_REFERER, "X-Title": DEFAULT_TITLE}
+    async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(OPENROUTER_MODELS_URL, headers=headers)
         if response.status_code != 200:
             raise RuntimeError(f"OpenRouter models request failed ({response.status_code})")
-        payload = response.json()
-        models = payload.get("data", []) if isinstance(payload, dict) else []
-        if not isinstance(models, list):
-            models = []
+        models = response.json().get("data", [])
         MODEL_CACHE["fetched_at"] = now
         MODEL_CACHE["models"] = models
         return models
 
 
-def rank_model_for_prompt(prompt: str, model_id: str) -> int:
-    text = prompt.lower()
-    model = model_id.lower()
-    score = 0
-    if any(k in text for k in ["code", "fix", "bug", "typescript", "python", "react", "refactor", "deploy"]):
-        if any(k in model for k in ["gpt-5", "gpt-4", "coder", "qwen"]):
-            score += 4
-    if any(k in text for k in ["reason", "math", "analysis", "plan", "logic"]):
-        if any(k in model for k in ["r1", "o1", "o3", "gpt-5", "think", "reason"]):
-            score += 4
-    if any(k in model for k in ["gpt-5", "gpt-4.1", "gpt-4o"]):
-        score += 2
-    if any(k in model for k in [":free", "mini", "nano"]):
-        score -= 1
-    return score
-
-
-def codex_curated_models() -> list[dict[str, str]]:
-    return [
-        {"id": "gpt-5.3", "label": "GPT-5.3 Codex"},
-        {"id": "gpt-5.2", "label": "GPT-5.2 Codex"},
-        {"id": "openai/gpt-5.2-chat", "label": "GPT-5.2"},
-        {"id": "deepseek/deepseek-r1", "label": "DeepSeek"},
-        {"id": "google/gemini-3-flash", "label": "Gemini 3 Flash"},
-        {"id": "meta-llama/llama-4", "label": "Llama 4"},
-        {"id": "openai/gpt-4o-mini", "label": "GPT-4o Mini"},
-    ]
-
-
-def codex_model_keywords() -> tuple[str, ...]:
-    return (
-        "gpt-5.3",
-        "gpt-5.2",
-        "gpt-4o-mini",
-        "deepseek-r1",
-        "gemini-3-flash",
-        "llama-4",
-    )
-
-
-def codex_label(model_id: str) -> str:
-    return model_id.split("/", 1)[-1].replace("-", " ").replace(":", " ").title()
-
-
-def merge_codex_models(dynamic_models: list[dict[str, Any]] | None = None) -> list[dict[str, str]]:
-    merged: dict[str, str] = {m["id"]: m["label"] for m in codex_curated_models()}
-    if dynamic_models:
-        for model in dynamic_models:
-            model_id = model.get("id") if isinstance(model, dict) else None
-            if not isinstance(model_id, str) or not model_id:
-                continue
-            lowered = model_id.lower()
-            if not any(keyword in lowered for keyword in codex_model_keywords()):
-                continue
-            merged.setdefault(model_id, codex_label(model_id))
-    return [{"id": model_id, "label": label} for model_id, label in merged.items()]
-
-
-def is_codex_model(model_id: str) -> bool:
-    normalized = model_id.strip().lower()
-    if "/" in normalized:
-        normalized = normalized.split("/", 1)[1]
-    return normalized in {"gpt-5.3", "gpt-5.2"}
-
-
-def should_use_codex(model_id: str, model_provider: str | None = None) -> bool:
-    # Codex model IDs must always route to Codex, even if frontend provider metadata is stale.
-    if is_codex_model(model_id):
-        return True
-
-    provider = (model_provider or "").strip().lower()
-    if provider == "codex":
-        return True
-    if provider == "openrouter":
-        return False
-    return False
-
-
-def codex_cli_model_id(model_id: str) -> str:
-    normalized = model_id.strip().lower()
-    if "/" in normalized:
-        normalized = normalized.split("/", 1)[1]
-    return normalized
-
-
-class RecommendPayload(BaseModel):
-    message: str = Field(min_length=1)
-    candidates: list[str] = Field(default_factory=list)
-    api_key: str | None = None
-
-
-class DeployPayload(BaseModel):
-    vfs: dict[str, str]
-    custom_domain: str | None = None
-
-
 @app.get("/api/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
+async def health_check() -> JSONResponse:
+    return JSONResponse(content={"ok": True})
+
+
+@app.get("/api/codex/status")
+async def codex_status() -> JSONResponse:
+    return JSONResponse(content=_codex_status_payload())
+
+
+@app.get("/api/codex/device-auth/start")
+@app.post("/api/codex/device-auth/start")
+async def codex_device_auth_start() -> JSONResponse:
+    payload = _codex_start_payload()
+    output = str(payload.get("output") or "")
+    if "Rate limited" in output:
+        return JSONResponse(status_code=429, content=payload)
+    return JSONResponse(content=payload)
+
+
+@app.post("/api/codex/disconnect")
+async def codex_disconnect() -> JSONResponse:
+    CODEX_AUTH_STATE["authenticated"] = False
+    CODEX_AUTH_STATE["code"] = None
+    CODEX_AUTH_STATE["code_expires_at"] = 0.0
+    CODEX_AUTH_STATE["next_start_allowed_at"] = 0.0
+    CODEX_AUTH_STATE["message"] = "Disconnected"
+    CODEX_AUTH_STATE["verification_url"] = CODEX_VERIFICATION_URL
+    return JSONResponse(content={"ok": True, "message": "Disconnected"})
 
 
 @app.post("/api/chat")
 async def chat_endpoint(payload: ChatPayload) -> StreamingResponse:
     system_prompt = build_system_prompt(payload.vfs, payload.system_prompt)
 
-    async def codex_stream_generator() -> Any:
-        prompt_parts = [
-            "SYSTEM INSTRUCTIONS:",
-            system_prompt,
-            "",
-            "USER REQUEST:",
-            payload.message,
-        ]
-        if payload.attachments:
-            prompt_parts.extend(["", "Attached image names:"])
-            prompt_parts.extend([f"- {attachment.name}" for attachment in payload.attachments])
-
-        final_prompt = "\n".join(prompt_parts)
-        model_name = codex_cli_model_id(payload.model)
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as prompt_file:
-            prompt_file.write(final_prompt)
-            prompt_path = prompt_file.name
-
-        cmd = ["codex", "exec", "-m", model_name, "--skip-git-repo-check", "--output-last-message", "-", "-"]
-        auth_error_detected = False
-
-        process = None
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            if process.stdin is not None:
-                with open(prompt_path, "rb") as prompt_reader:
-                    process.stdin.write(prompt_reader.read())
-                await process.stdin.drain()
-                process.stdin.close()
-
-            if process.stdout is None:
-                yield f"data: {json.dumps({'error': 'Codex output stream unavailable'})}\n\n"
-                yield "data: [DONE]\n\n"
-                return
-
-            while True:
-                chunk = await process.stdout.read(1024)
-                if not chunk:
-                    break
-                text = chunk.decode("utf-8", errors="ignore")
-                if not text:
-                    continue
-
-                clean_text = ANSI_ESCAPE_RE.sub("", text)
-                clean_text = ANSI_ORPHAN_RE.sub("", clean_text)
-                lowered = clean_text.lower()
-                if "401 unauthorized" in lowered or "missing bearer" in lowered:
-                    auth_error_detected = True
-
-                payload_chunk = {"choices": [{"delta": {"content": clean_text}}]}
-                yield f"data: {json.dumps(payload_chunk)}\n\n"
-
-            return_code = await process.wait()
-            if return_code != 0:
-                detail = "Codex execution failed. Reconnect Codex and retry."
-                if auth_error_detected:
-                    detail = "Codex is not authenticated. Open Settings and reconnect ChatGPT Codex."
-                error_payload = {
-                    "error": f"Codex request failed with status {return_code}",
-                    "detail": detail,
-                }
-                yield f"data: {json.dumps(error_payload)}\n\n"
-        except Exception as exc:  # noqa: BLE001
-            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
-        finally:
-            try:
-                os.remove(prompt_path)
-            except OSError:
-                pass
-            if process is not None and process.returncode is None:
-                process.kill()
+    async def openrouter_stream_generator():
+        api_key = str(payload.api_key or os.getenv("OPENROUTER_API_KEY") or "").strip()
+        if not api_key:
+            yield f"data: {json.dumps({'error': 'Missing OpenRouter API key. Add it in Settings or OPENROUTER_API_KEY env.'})}\n\n"
             yield "data: [DONE]\n\n"
+            return
 
-    async def openrouter_stream_generator() -> Any:
-        request_data: dict[str, Any] = {
+        request_data = {
             "model": payload.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -319,315 +453,141 @@ async def chat_endpoint(payload: ChatPayload) -> StreamingResponse:
             ],
             "stream": True,
         }
-
-        if not payload.api_key:
-            yield f"data: {json.dumps({'error': 'OpenRouter API key is required for this model.'})}\n\n"
-            yield "data: [DONE]\n\n"
-            return
-
-        headers = {
-            "Authorization": f"Bearer {payload.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": DEFAULT_REFERER,
-            "X-Title": DEFAULT_TITLE,
-        }
-
-        timeout = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
-
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
                 async with client.stream("POST", OPENROUTER_URL, headers=headers, json=request_data) as response:
                     if response.status_code != 200:
                         body = await response.aread()
-                        details = body.decode("utf-8", errors="ignore")[:600]
-                        error_payload = {
-                            "error": f"OpenRouter request failed with status {response.status_code}",
-                            "detail": details,
-                        }
-                        yield f"data: {json.dumps(error_payload)}\n\n"
-                        yield "data: [DONE]\n\n"
+                        yield f"data: {json.dumps({'error': body.decode('utf-8', errors='replace')})}\n\n"
                         return
-
                     async for chunk in response.aiter_lines():
-                        if not chunk:
-                            continue
                         if chunk.startswith("data:"):
                             yield f"{chunk}\n\n"
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+        yield "data: [DONE]\n\n"
+
+    async def codex_stream_generator():
+        codex_bin = shutil.which("codex")
+        if not codex_bin:
+            yield f"data: {json.dumps({'error': 'Codex CLI is not installed on backend server.'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        if not _codex_is_logged_in():
+            yield f"data: {json.dumps({'error': 'ChatGPT Codex is not connected. Open Settings and connect Codex first.'})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        codex_model = payload.model.strip() if payload.model.strip() else "gpt-5.2-codex"
+        with tempfile.NamedTemporaryFile(prefix="codex-chat-", suffix=".txt", delete=False) as out_file:
+            out_path = out_file.name
+
+        user_prompt = payload.message.strip()
+        if payload.attachments:
+            attachment_names = ", ".join(att.name for att in payload.attachments)
+            user_prompt = f"{user_prompt}\n\nAttached files: {attachment_names}"
+
+        composed_prompt = f"System instructions:\n{system_prompt}\n\nUser request:\n{user_prompt}"
+        cmd = ["codex", "exec", composed_prompt, "--model", codex_model, "-o", out_path]
+
+        try:
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env={
+                    **os.environ,
+                    "PYTHONIOENCODING": "utf-8",
+                    "PYTHONUTF8": "1",
+                    "LANG": os.environ.get("LANG", "C.UTF-8"),
+                    "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
+                },
+            )
+
+            output_text = ""
+            try:
+                output_text = Path(out_path).read_text(encoding="utf-8").strip()
+            except Exception:
+                output_text = ""
+
+            if proc.returncode != 0:
+                err = (proc.stderr or proc.stdout or "Codex request failed.").strip()
+                yield f"data: {json.dumps({'error': _ascii_safe(err)})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            if not output_text:
+                fallback = (proc.stdout or "").strip()
+                if fallback:
+                    output_text = fallback
+
+            if not output_text:
+                yield f"data: {json.dumps({'error': 'Codex returned an empty response.'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            chunk = {
+                "choices": [
+                    {"delta": {"content": output_text}}
+                ]
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+        except subprocess.TimeoutExpired:
+            yield f"data: {json.dumps({'error': 'Codex request timed out.'})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+        finally:
+            try:
+                Path(out_path).unlink(missing_ok=True)
+            except Exception:
+                pass
             yield "data: [DONE]\n\n"
 
-    use_codex = should_use_codex(payload.model, payload.model_provider)
-    generator = codex_stream_generator() if use_codex else openrouter_stream_generator()
-    return StreamingResponse(generator, media_type="text/event-stream")
-
+    model_provider = (payload.model_provider or "openrouter").strip().lower()
+    stream_generator = codex_stream_generator if model_provider == "codex" else openrouter_stream_generator
+    return StreamingResponse(stream_generator(), media_type="text/event-stream")
 
 @app.get("/api/models/openrouter")
 async def openrouter_models(api_key: str) -> JSONResponse:
     try:
         models = await get_openrouter_models(api_key)
-    except Exception as exc:  # noqa: BLE001
+        normalized = [{"id": m.get("id"), "name": m.get("name"), "context_length": m.get("context_length")} for m in models]
+        return JSONResponse(content={"models": normalized})
+    except Exception as exc:
         return JSONResponse(status_code=502, content={"error": str(exc), "models": []})
-
-    normalized = [
-        {
-            "id": m.get("id", ""),
-            "name": m.get("name") or m.get("id", ""),
-            "context_length": m.get("context_length", 0),
-        }
-        for m in models
-        if isinstance(m, dict) and isinstance(m.get("id"), str)
-    ]
-    return JSONResponse(content={"models": normalized})
-
-
-@app.get("/api/models/codex")
-async def codex_models(api_key: str | None = None) -> JSONResponse:
-    dynamic_models: list[dict[str, Any]] = []
-    if api_key:
-        try:
-            dynamic_models = await get_openrouter_models(api_key)
-        except Exception:
-            dynamic_models = []
-    return JSONResponse(content={"models": merge_codex_models(dynamic_models)})
 
 
 @app.post("/api/models/recommend")
 async def recommend_model(payload: RecommendPayload) -> JSONResponse:
-    dynamic_models: list[dict[str, Any]] = []
-    if payload.api_key:
-        try:
-            dynamic_models = await get_openrouter_models(payload.api_key)
-        except Exception:
-            dynamic_models = []
-
-    codex_model_ids = [m["id"] for m in merge_codex_models(dynamic_models)]
-    candidates = payload.candidates or codex_model_ids
+    candidates = [candidate.strip() for candidate in payload.candidates if candidate and candidate.strip()]
     if not candidates:
-        return JSONResponse(status_code=400, content={"error": "No candidates provided"})
+        return JSONResponse(content={"recommended": None, "reason": "No model candidates provided."})
 
-    scored = [(model_id, rank_model_for_prompt(payload.message, model_id)) for model_id in candidates]
-    scored.sort(key=lambda item: item[1], reverse=True)
-    best, best_score = scored[0]
+    message = payload.message.lower()
+    ranked = sorted(candidates, key=lambda candidate: len(candidate))
 
-    prompt_lower = payload.message.lower()
-    reason = "Best overall Codex model for this prompt."
-    if any(k in prompt_lower for k in ["code", "fix", "bug", "typescript", "python", "react", "refactor", "deploy"]):
-        reason = "Your prompt is code-heavy, so this coding-capable model is prioritized."
-    elif any(k in prompt_lower for k in ["reason", "math", "analysis", "plan", "logic"]):
-        reason = "Your prompt needs deeper reasoning, so the highest reasoning-scored model is selected."
-    elif best_score <= 0:
-        reason = "No strong keyword match found; using the best available default Codex model."
+    keyword_priority = [
+        ("reason|math|analysis|plan|logic", ["gpt-5.3", "gpt-5"]),
+        ("code|debug|typescript|python|api|refactor|bug|error|html|css|js", ["gpt-5.2", "claude", "qwen"]),
+        ("image|vision|photo|screenshot", ["gpt-4o", "vision", "gemini"]),
+    ]
 
-    return JSONResponse(content={"recommended": best, "ranked": [model_id for model_id, _ in scored[:8]], "reason": reason})
+    for pattern, preferred_tokens in keyword_priority:
+        if re.search(pattern, message):
+            for token in preferred_tokens:
+                for candidate in candidates:
+                    if token in candidate.lower():
+                        return JSONResponse(content={"recommended": candidate, "reason": f"Matched intent keyword: {token}."})
 
+    preferred = ranked[0]
+    return JSONResponse(content={"recommended": preferred, "reason": "Using default heuristic fallback."})
 
-async def run_tty_command(command: str, timeout_seconds: int = 20) -> tuple[int, str]:
-    wrapped = f"script -q /dev/null -c {shlex.quote(command)}"
-    process = await asyncio.create_subprocess_shell(
-        wrapped,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-
-    try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
-    except TimeoutError:
-        process.kill()
-        return 124, "Codex login is taking too long. Try again, then run 'codex login --device-auth' manually in the backend terminal if it still times out."
-
-    output = stdout.decode("utf-8", errors="ignore")
-    ansi_escape = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-    return process.returncode or 0, ansi_escape.sub("", output).strip()
-
-
-async def run_codex_command(timeout_seconds: int = 90) -> CodexCommandResult:
-    code, output = await run_tty_command("codex login --device-auth", timeout_seconds=timeout_seconds)
-
-    if code == 127 or "not found" in output.lower():
-        return CodexCommandResult(
-            authenticated=False,
-            output="Codex CLI is not installed on this server. Install it first.",
-        )
-
-    code_pattern = re.compile(r"\b[A-Z0-9]{4}-[A-Z0-9]{5}\b")
-    url_pattern = re.compile(r"https?://[^\s\x1b]+")
-
-    match_code = code_pattern.search(output)
-    match_url = url_pattern.search(output)
-
-    return CodexCommandResult(
-        authenticated=False,
-        code=match_code.group(0) if match_code else None,
-        verification_url=match_url.group(0) if match_url else "https://auth.openai.com/codex/device",
-        output="\n".join(output.splitlines()[-30:]) if output else None,
-    )
-
-
-@app.get("/api/codex/device-auth/start")
-async def codex_device_auth_start() -> JSONResponse:
-    global CODEX_DEVICE_AUTH_COOLDOWN_UNTIL
-
-    now = time.time()
-    if now < CODEX_DEVICE_AUTH_COOLDOWN_UNTIL:
-        retry_after_seconds = max(1, int(CODEX_DEVICE_AUTH_COOLDOWN_UNTIL - now))
-        return JSONResponse(
-            status_code=429,
-            content=CodexCommandResult(
-                authenticated=False,
-                output=f"Device auth is temporarily rate-limited. Try again in {retry_after_seconds}s.",
-                retry_after_seconds=retry_after_seconds,
-            ).model_dump(),
-        )
-
-    result = await run_codex_command(timeout_seconds=90)
-    if not result.code:
-        lowered = (result.output or "").lower()
-        if "429" in lowered or "too many" in lowered or "rate limit" in lowered:
-            CODEX_DEVICE_AUTH_COOLDOWN_UNTIL = time.time() + CODEX_DEVICE_AUTH_COOLDOWN_SECONDS
-            result.retry_after_seconds = CODEX_DEVICE_AUTH_COOLDOWN_SECONDS
-            return JSONResponse(status_code=429, content=result.model_dump())
-        return JSONResponse(status_code=500, content=result.model_dump())
-
-    CODEX_DEVICE_AUTH_COOLDOWN_UNTIL = 0.0
-    result.retry_after_seconds = None
-    return JSONResponse(content=result.model_dump())
-
-
-@app.get("/api/codex/status")
-async def codex_status() -> JSONResponse:
-    code, output = await run_tty_command("codex login status", timeout_seconds=12)
-    lowered = output.lower()
-
-    if code == 127 or "not found" in lowered:
-        return JSONResponse(content={"authenticated": False, "message": "Codex CLI is not installed."})
-
-    if "logged in" in lowered and "not logged" not in lowered:
-        return JSONResponse(content={"authenticated": True, "message": "Connected"})
-
-    unauth_signals = ("not logged", "not authenticated", "login", "unauthorized", "stdout is not a terminal", "stdin is not a terminal")
-    if any(signal in lowered for signal in unauth_signals):
-        return JSONResponse(content={"authenticated": False, "message": "Not authenticated."})
-
-    return JSONResponse(content={"authenticated": False, "message": output or "Not authenticated."})
-
-
-@app.post("/api/codex/disconnect")
-async def codex_disconnect() -> JSONResponse:
-    code, output = await run_tty_command("codex logout", timeout_seconds=20)
-    lowered = output.lower()
-    if code == 127 or "not found" in lowered:
-        return JSONResponse(content={"ok": False, "message": "Codex CLI is not installed."}, status_code=404)
-    if code != 0 and "not logged" not in lowered:
-        return JSONResponse(content={"ok": False, "message": output or "Failed to disconnect Codex."}, status_code=500)
-    return JSONResponse(content={"ok": True, "message": "Codex disconnected."})
-
-
-@app.post("/api/publish/vercel")
-async def publish_vercel(payload: DeployPayload) -> JSONResponse:
-    DEPLOYMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    workspace = DEPLOYMENTS_DIR / f"deploy-{int(time.time() * 1000)}"
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    try:
-        for file_name, content in payload.vfs.items():
-            if not file_name or ".." in file_name or file_name.startswith("/"):
-                return JSONResponse(status_code=400, content={"error": f"Invalid file path: {file_name}"})
-            target = workspace / file_name
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-
-        token = os.getenv("VERCEL_TOKEN", "")
-        if not token:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "ok": False,
-                    "error": "VERCEL_TOKEN is missing on backend. Add a valid Vercel token to enable one-click deploy.",
-                },
-            )
-
-        cmd = ["npx", "vercel", "--prod", "--yes", "--token", token]
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(workspace),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-
-        try:
-            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=300)
-        except TimeoutError:
-            process.kill()
-            return JSONResponse(status_code=504, content={"error": "Vercel deploy timed out"})
-
-        output = stdout.decode("utf-8", errors="ignore")
-        ansi_escape = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-        clean_output = ansi_escape.sub("", output)
-        lowered = clean_output.lower()
-
-        if "token is not valid" in lowered or "invalid token" in lowered:
-            return JSONResponse(
-                status_code=401,
-                content={"ok": False, "error": "VERCEL_TOKEN is invalid. Generate a new token and update backend environment.", "output": clean_output[-4000:]},
-            )
-
-        url_match = re.search(r"https://[^\s]+\.vercel\.app", clean_output)
-        if process.returncode == 0:
-            deployed_url = url_match.group(0) if url_match else ""
-            domain_message = ""
-            custom_domain = (payload.custom_domain or "").strip()
-            if custom_domain:
-                domain_cmd = ["npx", "vercel", "domains", "add", custom_domain, "--token", token]
-                domain_process = await asyncio.create_subprocess_exec(
-                    *domain_cmd,
-                    cwd=str(workspace),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                )
-                try:
-                    domain_stdout, _ = await asyncio.wait_for(domain_process.communicate(), timeout=120)
-                    domain_output = ansi_escape.sub("", domain_stdout.decode("utf-8", errors="ignore"))
-                    if domain_process.returncode == 0:
-                        domain_message = f"Custom domain '{custom_domain}' added. Configure DNS in Vercel dashboard."
-                    else:
-                        domain_message = (
-                            f"Deploy succeeded but custom domain add failed for '{custom_domain}'. "
-                            f"Details: {domain_output[-400:]}"
-                        )
-                except TimeoutError:
-                    domain_process.kill()
-                    domain_message = f"Deploy succeeded but custom domain add timed out for '{custom_domain}'."
-            return JSONResponse(content={
-                "ok": True,
-                "url": deployed_url,
-                "output": clean_output[-4000:],
-                "domain_message": domain_message,
-            })
-        return JSONResponse(status_code=500, content={"ok": False, "output": clean_output[-4000:]})
-
-    finally:
-        for f in workspace.rglob("*"):
-            if f.is_file():
-                f.unlink(missing_ok=True)
-        for d in sorted([d for d in workspace.rglob("*") if d.is_dir()], reverse=True):
-            d.rmdir()
-        workspace.rmdir()
-
-
-@app.post("/api/code/download")
-async def download_code(payload: DeployPayload):
-    buffer = BytesIO()
-    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for file_name, content in payload.vfs.items():
-            if not file_name or ".." in file_name or file_name.startswith("/"):
-                return JSONResponse(status_code=400, content={"error": f"Invalid file path: {file_name}"})
-            zf.writestr(file_name, content)
-    zip_bytes = buffer.getvalue()
-    headers = {"Content-Disposition": "attachment; filename=project-files.zip"}
-    return StreamingResponse(iter([zip_bytes]), media_type="application/zip", headers=headers)
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Final safety: use a logger that won't panic on UTF-8 characters
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

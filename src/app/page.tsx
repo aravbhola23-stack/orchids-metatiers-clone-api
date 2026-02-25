@@ -60,14 +60,14 @@ const STORAGE_KEYS = {
   modelId: "uai_custom_model_id",
 };
 
+const SUPPORT_EMAIL = "support@aiassistantallinone.com";
+const STATUS_URL = "https://status.openrouter.ai/";
+const CODEX_DEVICE_CODE_RE = /^[A-Z0-9]{4}-[A-Z0-9]{5}$/;
+
 const BASE_MODEL_OPTIONS: ModelOption[] = [
-  { label: "Auto (best + Codex)", value: "auto", icon: "auto", provider: "auto" },
-  { label: "GPT-5.3 Codex", value: "codex-gpt-5.3", icon: "gpt", provider: "codex", modelId: "gpt-5.3" },
-  { label: "GPT-5.2 Codex", value: "codex-gpt-5.2", icon: "gpt", provider: "codex", modelId: "gpt-5.2" },
-  { label: "GPT-5.2", value: "openrouter-gpt-5.2", icon: "gpt", provider: "openrouter", modelId: "openai/gpt-5.2-chat" },
-  { label: "DeepSeek (Free)", value: "openrouter-deepseek", icon: "deepseek", provider: "openrouter", modelId: "deepseek/deepseek-r1:free" },
-  { label: "Gemini 3 Flash", value: "openrouter-gemini-3-flash", icon: "gemini", provider: "openrouter", modelId: "google/gemini-3-flash" },
-  { label: "Llama 4", value: "openrouter-llama-4", icon: "llama", provider: "openrouter", modelId: "meta-llama/llama-4" },
+  { label: "Auto (smart routing)", value: "auto", icon: "auto", provider: "auto" },
+  { label: "ChatGPT Codex (connected account)", value: "codex-chatgpt", icon: "gpt", provider: "codex", modelId: "gpt-5.2-codex" },
+  { label: "Llama 3.2 3B Instruct (Free)", value: "openrouter-llama-3.2-3b-free", icon: "llama", provider: "openrouter", modelId: "meta-llama/llama-3.2-3b-instruct:free" },
   { label: "GPT-4o Mini", value: "openrouter-gpt-4o-mini", icon: "gpt", provider: "openrouter", modelId: "openai/gpt-4o-mini" },
 ];
 
@@ -128,7 +128,9 @@ const escapeHtml = (s: string) =>
 
 const modelOptionText = (option: ModelOption): string => option.label;
 
-const AUTO_CANDIDATE_IDS = BASE_MODEL_OPTIONS.filter(m => m.provider !== "auto").map(m => m.modelId ?? m.value);
+const AUTO_CANDIDATE_IDS = BASE_MODEL_OPTIONS
+  .filter(m => m.provider === "openrouter")
+  .map(m => m.modelId ?? m.value);
 
 const MODEL_OPTION_BY_VALUE = new Map(BASE_MODEL_OPTIONS.map(option => [option.value, option]));
 
@@ -160,7 +162,7 @@ const renderModelIcon = (icon: string, size = 16): React.ReactNode => {
       );
   }
 
-  const fallback = MODEL_ICON_STYLE[icon] ?? { glyph: "•", bg: "linear-gradient(135deg, #64748b, #475569)" };
+  const fallback = MODEL_ICON_STYLE[icon] ?? { glyph: "*", bg: "linear-gradient(135deg, #64748b, #475569)" };
   return (
     <span
       aria-hidden
@@ -186,29 +188,29 @@ const renderModelIcon = (icon: string, size = 16): React.ReactNode => {
 
 
 const LEGACY_MODEL_VALUE_MAP: Record<string, string> = {
-  "openai/gpt-5.3": "codex-gpt-5.3",
-  "openai/gpt-5.2": "codex-gpt-5.2",
-  "gpt-5.3": "codex-gpt-5.3",
-  "gpt-5.2": "codex-gpt-5.2",
-  "openai/gpt-5.2-chat": "openrouter-gpt-5.2",
-  "deepseek/deepseek-r1": "openrouter-deepseek",
-  "deepseek/deepseek-r1:free": "openrouter-deepseek",
-  "google/gemini-3-flash": "openrouter-gemini-3-flash",
-  "meta-llama/llama-4": "openrouter-llama-4",
+  "openai/gpt-5.3": "codex-chatgpt",
+  "openai/gpt-5.2": "codex-chatgpt",
+  "gpt-5.3": "codex-chatgpt",
+  "gpt-5.2": "codex-chatgpt",
+  "gpt-5.2-codex": "codex-chatgpt",
+  "codex-gpt-5.3": "codex-chatgpt",
+  "codex-gpt-5.2": "codex-chatgpt",
+  "meta-llama/llama-3.2-3b-instruct:free": "openrouter-llama-3.2-3b-free",
   "openai/gpt-4o-mini": "openrouter-gpt-4o-mini",
 };
 
 const normalizeSelectedModelValue = (value: string): string => {
   if (MODEL_OPTION_BY_VALUE.has(value)) return value;
-  return LEGACY_MODEL_VALUE_MAP[value] ?? "openrouter-deepseek";
+  return LEGACY_MODEL_VALUE_MAP[value] ?? "openrouter-llama-3.2-3b-free";
 };
 
-const pickAutoModel = (prompt: string): string => {
+const pickAutoModel = (prompt: string, codexReady: boolean): string => {
   const n = prompt.toLowerCase();
-  if (/reason|math|analysis|think|plan|logic/.test(n)) return "gpt-5.3";
-  if (/code|debug|typescript|python|api|refactor|bug|error|html|css|js/.test(n)) return "gpt-5.2";
+  if (codexReady && /reason|math|analysis|think|plan|logic|code|debug|typescript|python|api|refactor|bug|error|html|css|js/.test(n)) {
+    return "gpt-5.2-codex";
+  }
   if (/image|vision|photo|screenshot/.test(n)) return "openai/gpt-4o-mini";
-  return "openai/gpt-5.2-chat";
+  return codexReady ? "gpt-5.2-codex" : "openai/gpt-4o-mini";
 };
 
 const buildPreviewHtml = (vfs: Record<string, string>): string => {
@@ -278,25 +280,25 @@ const I = {
 // ── Theme tokens ──────────────────────────────────────────────────────
 function tokens(isDark: boolean) {
   return {
-    bg: isDark ? "#0f1117" : "#ffffff",
-    bgSurface: isDark ? "#1a1d27" : "#f7f7f8",
-    bgCard: isDark ? "#1e2235" : "#ffffff",
-    bgHover: isDark ? "#252840" : "#f1f5f9",
-    bgSidebar: isDark ? "#111318" : "#f7f7f8",
-    bgInput: isDark ? "#1e2235" : "#ffffff",
-    bgUserMsg: isDark ? "#4f46e5" : "#4f46e5",
-    bgAsstMsg: isDark ? "#1e2235" : "#f7f7f8",
-    border: isDark ? "#2a2d3e" : "#e5e7eb",
-    borderStrong: isDark ? "#373a52" : "#d1d5db",
-    text: isDark ? "#f1f5f9" : "#111827",
-    textMuted: isDark ? "#8b92a9" : "#6b7280",
-    textSubtle: isDark ? "#5a6070" : "#9ca3af",
-    primary: isDark ? "#6366f1" : "#4f46e5",
-    primaryHover: isDark ? "#5558e0" : "#4338ca",
-    danger: isDark ? "#ef4444" : "#dc2626",
-    dangerBg: isDark ? "#2d1515" : "#fef2f2",
+    bg: isDark ? "#07090f" : "#f3f6fb",
+    bgSurface: isDark ? "#121827" : "#ffffff",
+    bgCard: isDark ? "#171e2d" : "#ffffff",
+    bgHover: isDark ? "#242e45" : "#edf2fb",
+    bgSidebar: isDark ? "#0c111d" : "#eaf0f9",
+    bgInput: isDark ? "#141c2b" : "#ffffff",
+    bgUserMsg: isDark ? "#7489a8" : "#6a809f",
+    bgAsstMsg: isDark ? "#161f30" : "#f8fbff",
+    border: isDark ? "#33405a" : "#cfdaed",
+    borderStrong: isDark ? "#46587a" : "#b7c8e3",
+    text: isDark ? "#eef3fb" : "#0f1728",
+    textMuted: isDark ? "#b1bfd7" : "#556784",
+    textSubtle: isDark ? "#8fa0ba" : "#7f8fa7",
+    primary: isDark ? "#c3d1e5" : "#5f789b",
+    primaryHover: isDark ? "#b6c7de" : "#4d678c",
+    danger: isDark ? "#f87171" : "#dc2626",
+    dangerBg: isDark ? "#351919" : "#fef2f2",
     success: "#10b981",
-    codePreBg: isDark ? "#12141c" : "#1e1e2e",
+    codePreBg: isDark ? "#0d1626" : "#1f2937",
   };
 }
 
@@ -309,7 +311,7 @@ export default function Page() {
   const [activePanel, setActivePanel] = useState<"chat" | "code" | "app">("chat");
 
   const [apiKey, setApiKey] = useState("");
-  const [selectedModel, setSelectedModel] = useState("openrouter-deepseek");
+  const [selectedModel, setSelectedModel] = useState("openrouter-llama-3.2-3b-free");
   const [customModelId, setCustomModelId] = useState("");
   const [backendUrl, setBackendUrl] = useState("/api/chat");
   const [globalSystemPrompt, setGlobalSystemPrompt] = useState("");
@@ -345,6 +347,7 @@ export default function Page() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const codexCooldownTimerRef = useRef<number | null>(null);
+  const codexStatusPollTimerRef = useRef<number | null>(null);
 
   const activeChat = useMemo(() => chats.find(c => c.id === activeChatId) ?? null, [chats, activeChatId]);
   const activeVfs = activeChat?.vfs ?? defaultVfs();
@@ -380,7 +383,7 @@ export default function Page() {
   useEffect(() => {
     const storedTheme = (localStorage.getItem(STORAGE_KEYS.theme) as Theme | null) ?? "light";
     const storedApiKey = localStorage.getItem(STORAGE_KEYS.apiKey) ?? "";
-    const storedModel = normalizeSelectedModelValue(localStorage.getItem(STORAGE_KEYS.model) ?? "openrouter-deepseek");
+    const storedModel = normalizeSelectedModelValue(localStorage.getItem(STORAGE_KEYS.model) ?? "openrouter-llama-3.2-3b-free");
     // Always use the Next.js proxy — ignore any stale localhost URL in localStorage
     const storedBackend = "/api/chat";
     localStorage.setItem(STORAGE_KEYS.backendUrl, storedBackend);
@@ -437,6 +440,9 @@ export default function Page() {
       abortControllerRef.current?.abort();
       if (codexCooldownTimerRef.current !== null) {
         window.clearTimeout(codexCooldownTimerRef.current);
+      }
+      if (codexStatusPollTimerRef.current !== null) {
+        window.clearInterval(codexStatusPollTimerRef.current);
       }
     };
   }, []);
@@ -541,13 +547,22 @@ export default function Page() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message, candidates, api_key: apiKey.trim() || undefined }),
       });
-      const data = await res.json() as { recommended?: string; reason?: string };
+      const data = await res.json() as { recommended?: string; reason?: string; error?: string };
+      if (!res.ok) {
+        return {
+          model: null,
+          reason: data.error || "Could not auto-rank models.",
+        };
+      }
       return {
         model: data.recommended ?? null,
         reason: data.reason ?? "Best match for your request.",
       };
     } catch {
-      return { model: null, reason: "Could not auto-rank models, using fallback." };
+      return {
+        model: null,
+        reason: "Could not auto-rank models, using built-in fallback.",
+      };
     }
   };
 
@@ -611,6 +626,21 @@ export default function Page() {
   };
 
   // ── Codex ──
+  const startCodexStatusPolling = () => {
+    if (codexStatusPollTimerRef.current !== null) {
+      window.clearInterval(codexStatusPollTimerRef.current);
+    }
+    codexStatusPollTimerRef.current = window.setInterval(() => {
+      void checkCodexStatus({ silentIfNotAuthed: true });
+    }, 800);
+    window.setTimeout(() => {
+      if (codexStatusPollTimerRef.current !== null) {
+        window.clearInterval(codexStatusPollTimerRef.current);
+        codexStatusPollTimerRef.current = null;
+      }
+    }, 180000);
+  };
+
   const startCodexConnect = async () => {
     if (codexLoading) return;
 
@@ -624,32 +654,40 @@ export default function Page() {
     setCodexLoading(true);
     setCodexStatus("Requesting device code…");
     try {
-      const res = await fetch("/api/codex/device-auth/start", { cache: "no-store" });
-      const data = await res.json() as { code?: string; verification_url?: string; output?: string; authenticated?: boolean; retry_after_seconds?: number };
-      if (!res.ok || !data.code) {
-        const message = stripAnsi(data.output || "Unable to start device auth. Is the Python server running?");
-        setCodexStatus(message);
-        setCodexCode("");
+        const res = await fetch("/api/codex/device-auth/start", { cache: "no-store" });
+        const data = await res.json() as { code?: string; verification_url?: string; output?: string; authenticated?: boolean; retry_after_seconds?: number };
+        const receivedCode = (data.code ?? "").trim().toUpperCase();
+        const hasValidCode = CODEX_DEVICE_CODE_RE.test(receivedCode);
+        if (!res.ok || !hasValidCode) {
+          const message = stripAnsi(data.output || "Unable to start device auth. Is the Python server running?");
+          const statusMessage = !res.ok
+            ? message
+            : (message || `Backend returned an invalid device code format (${receivedCode || "empty"}). Click Connect again.`);
+          setCodexStatus(statusMessage);
+          setCodexCode("");
 
-        if (res.status === 429 || /429|too many|rate limit/i.test(message)) {
-          const retryAfterSeconds = typeof data.retry_after_seconds === "number" && data.retry_after_seconds > 0
-            ? data.retry_after_seconds
-            : 60;
-          const retryAfterMs = retryAfterSeconds * 1000;
-          const until = Date.now() + retryAfterMs;
-          setCodexCooldownUntil(until);
-          if (codexCooldownTimerRef.current !== null) {
-            window.clearTimeout(codexCooldownTimerRef.current);
+          if (res.status === 429 || /429|too many|rate limit/i.test(message)) {
+            const retryAfterSeconds = typeof data.retry_after_seconds === "number" && data.retry_after_seconds > 0
+              ? data.retry_after_seconds
+              : 60;
+            const retryAfterMs = retryAfterSeconds * 1000;
+            const until = Date.now() + retryAfterMs;
+            setCodexCooldownUntil(until);
+            if (codexCooldownTimerRef.current !== null) {
+              window.clearTimeout(codexCooldownTimerRef.current);
+            }
+            codexCooldownTimerRef.current = window.setTimeout(() => {
+              setCodexCooldownUntil(0);
+            }, retryAfterMs);
           }
-          codexCooldownTimerRef.current = window.setTimeout(() => {
-            setCodexCooldownUntil(0);
-          }, retryAfterMs);
+        } else {
+          setCodexCode(receivedCode);
+          setCodexUrl(data.verification_url || "https://auth.openai.com/codex/device");
+          setCodexStatus("Enter this exact 9-character code at auth.openai.com/codex/device.");
+          void checkCodexStatus({ silentIfNotAuthed: true });
+          startCodexStatusPolling();
         }
-      } else {
-        setCodexCode(data.code);
-        setCodexUrl(data.verification_url || "https://auth.openai.com/codex/device");
-        setCodexStatus("Enter the code at the link below.");
-      }
+
     } catch {
       setCodexStatus("Could not reach the backend server.");
     } finally {
@@ -657,18 +695,37 @@ export default function Page() {
     }
   };
 
-  const checkCodexStatus = async () => {
+  const checkCodexStatus = async (opts?: { silentIfNotAuthed?: boolean }) => {
     try {
-      const res = await fetch("/api/codex/status");
-      const data = await res.json() as { authenticated?: boolean; message?: string };
-      setCodexAuthed(Boolean(data.authenticated));
-      if (data.authenticated) {
+      const res = await fetch("/api/codex/status", { cache: "no-store" });
+      const data = await res.json() as { authenticated?: boolean; message?: string; code?: string; verification_url?: string };
+      const authenticated = Boolean(data.authenticated);
+      setCodexAuthed(authenticated);
+      if (authenticated) {
         setCodexStatus("Connected");
-      } else {
+        setCodexCode("");
+        if (codexStatusPollTimerRef.current !== null) {
+          window.clearInterval(codexStatusPollTimerRef.current);
+          codexStatusPollTimerRef.current = null;
+        }
+        return;
+      }
+
+      if (data.code) {
+        setCodexCode(data.code);
+      }
+      if (data.verification_url) {
+        setCodexUrl(data.verification_url);
+      }
+
+      if (!opts?.silentIfNotAuthed || data.code) {
         setCodexStatus(stripAnsi(data.message || "Not authenticated."));
       }
     } catch {
-      setCodexStatus("Cannot reach backend. UI runs on :3000 and proxies Codex status to the configured Python backend URL.");
+        if (!opts?.silentIfNotAuthed) {
+          setCodexStatus("Cannot reach Python backend. Start backend on http://127.0.0.1:8000 (python3 main.py) or update PYTHON_BACKEND_URL.");
+        }
+
     }
   };
 
@@ -718,37 +775,50 @@ export default function Page() {
       messages: [...c.messages, userMsg, asstMsg],
     }));
 
-    try {
-      let resolvedModel = resolveModelId(selectedModel);
-      if (selectedModel === "auto") {
-        const candidates = [...AUTO_CANDIDATE_IDS];
-        const customId = customModelId.trim();
-        if (customId) candidates.unshift(customId);
-        const recommendation = await recommendModel(content, candidates);
-        resolvedModel = recommendation.model ?? pickAutoModel(content);
-        const autoProvider = /gpt-5\.(3|2)$/i.test(resolvedModel) ? "Codex" : "OpenRouter";
-        setLastModelDecision(`${autoProvider}: ${resolvedModel} — ${recommendation.reason}`);
-      } else {
-        resolvedModel = resolveModelId(selectedModel);
-        const providerLabel = selectedOption?.provider === "codex" ? "Codex" : "OpenRouter";
-        setLastModelDecision(`${providerLabel}: ${resolvedModel}`);
-      }
+      try {
+        let resolvedModel = resolveModelId(selectedModel);
+        let selectedProvider: ModelProvider = selectedOption?.provider ?? "openrouter";
 
-      const resolvedIsCodex = /gpt-5\.(3|2)$/i.test(resolvedModel);
-      if (resolvedIsCodex && !codexAuthed) {
-        throw new Error("Selected model is a Codex model. Connect Codex in Settings first.");
-      }
-      if (!resolvedIsCodex && !apiKey.trim()) {
-        throw new Error("Add your OpenRouter API key in Settings first.");
-      }
+        if (selectedModel === "auto") {
+          const candidates = [...AUTO_CANDIDATE_IDS];
+          if (codexAuthed) {
+            candidates.unshift("gpt-5.2-codex");
+          }
+          const customId = customModelId.trim();
+          if (customId) candidates.unshift(customId);
+          const recommendation = await recommendModel(content, candidates);
+          resolvedModel = recommendation.model ?? pickAutoModel(content, codexAuthed);
+          selectedProvider = resolvedModel.toLowerCase().includes("codex") ? "codex" : "openrouter";
 
-      const systemPrompt = activeChat.systemPrompt || globalSystemPrompt;
-      setIsStreaming(true);
-      abortControllerRef.current = new AbortController();
-      const selectedProvider: ModelProvider = selectedModel === "auto"
-        ? (resolvedIsCodex ? "codex" : "openrouter")
-        : (selectedOption?.provider ?? "openrouter");
-      const response = await fetch(backendUrl, {
+          const autoProvider = selectedProvider === "codex" ? "ChatGPT Codex" : "OpenRouter";
+          const source = recommendation.model ? recommendation.reason : `Fallback used: ${recommendation.reason}`;
+          setLastModelDecision(`${autoProvider}: ${resolvedModel} - ${source}`);
+        } else {
+          resolvedModel = resolveModelId(selectedModel);
+          selectedProvider = selectedOption?.provider ?? "openrouter";
+          const providerLabel = selectedProvider === "codex" ? "ChatGPT Codex" : "OpenRouter";
+          setLastModelDecision(`${providerLabel}: ${resolvedModel}`);
+        }
+
+        const requestedCodexModel = resolvedModel.toLowerCase().includes("codex");
+        if (selectedProvider === "openrouter" && !apiKey.trim()) {
+          throw new Error("Add your OpenRouter API key in Settings first.");
+        }
+
+        if (requestedCodexModel && !codexAuthed) {
+          if (selectedProvider === "codex") {
+            throw new Error("ChatGPT Codex is not connected. Connect it in Settings and try again.");
+          }
+          selectedProvider = "openrouter";
+          resolvedModel = "openai/gpt-4o-mini";
+          setLastModelDecision("OpenRouter fallback: ChatGPT Codex requested but Codex is not connected.");
+        }
+
+        const systemPrompt = activeChat.systemPrompt || globalSystemPrompt;
+        setIsStreaming(true);
+        abortControllerRef.current = new AbortController();
+        const response = await fetch(backendUrl, {
+
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: abortControllerRef.current.signal,
@@ -819,15 +889,17 @@ export default function Page() {
       if (Object.keys(fileUpdates).length > 0) {
         updateActiveChat(c => ({ ...c, vfs: { ...c.vfs, ...fileUpdates } }));
       }
-    } catch (e) {
-      if (e instanceof DOMException && e.name === "AbortError") {
-        appendToMsg(asstMsg.id, "\n\n_Stopped by user._");
-      } else {
-        const msg = e instanceof Error ? e.message : "Unknown error";
-        setError(msg);
-        appendToMsg(asstMsg.id, `\n\n**Error:** ${msg}`);
-      }
-    } finally {
+          } catch (e) {
+            if (e instanceof DOMException && e.name === "AbortError") {
+              appendToMsg(asstMsg.id, "\n\n_Stopped by user._");
+            } else {
+              const msg = e instanceof Error ? e.message : "Unknown error";
+              setLastModelDecision("API request failed");
+              setError(`Primary AI backend failed (${msg}). Chat stayed inside this app using API-only mode.`);
+              appendToMsg(asstMsg.id, `\n\n**Error:** ${msg}`);
+            }
+          } finally {
+
       abortControllerRef.current = null;
       setIsStreaming(false);
       setQueuedPrompts(prev => {
@@ -841,9 +913,10 @@ export default function Page() {
   };
 
   const sendMessage = async () => {
-    if (!activeChat) return;
-    const content = prompt.trim();
+      if (!activeChat) return;
+      const content = prompt.trim();
       if (!content && pendingAttachments.length === 0) return;
+
       const codexOnlySelected = selectedOption?.provider === "codex";
       const openRouterOnlySelected = selectedOption?.provider === "openrouter";
       if (openRouterOnlySelected && !apiKey.trim()) {
@@ -852,11 +925,10 @@ export default function Page() {
         return;
       }
       if (codexOnlySelected && !codexAuthed) {
-        setError("Selected model is a Codex model. Connect Codex in Settings first.");
+        setError("ChatGPT Codex is not connected. Connect it in Settings first.");
         setSettingsOpen(true);
         return;
       }
-
 
       const payloadText = content || "Analyze the attached image(s).";
     const payloadAttachments = [...pendingAttachments];
@@ -921,12 +993,16 @@ export default function Page() {
     justifyContent: "center",
   };
 
-        return (
-          <div style={{ height: "100dvh", overflow: "hidden", background: T.bg, color: T.text, fontFamily: "'Inter', system-ui, sans-serif", display: "flex", minHeight: 0 }}>
+  const premiumGlassStyle: React.CSSProperties = {
+    background: isDark ? "rgba(17,23,35,0.82)" : "rgba(255,255,255,0.82)",
+    border: `1px solid ${T.border}`,
+    boxShadow: isDark ? "0 16px 40px rgba(0,0,0,0.34)" : "0 14px 36px rgba(30,41,59,0.14)",
+    backdropFilter: "blur(14px)",
+    WebkitBackdropFilter: "blur(14px)",
+  };
 
-
-
-
+  return (
+    <div style={{ height: "100dvh", overflow: "hidden", background: `radial-gradient(circle at top right, ${isDark ? "rgba(148,163,184,0.26)" : "rgba(148,163,184,0.3)"}, transparent 34%), radial-gradient(circle at 16% 8%, ${isDark ? "rgba(203,213,225,0.16)" : "rgba(148,163,184,0.14)"}, transparent 38%), linear-gradient(180deg, ${T.bg} 0%, ${isDark ? "#070a10" : "#e8edf6"} 100%)`, color: T.text, fontFamily: "'Inter', system-ui, sans-serif", display: "flex", minHeight: 0 }}>
       {/* ── Sidebar ── */}
       <>
         {/* Mobile backdrop */}
@@ -938,29 +1014,36 @@ export default function Page() {
           />
         )}
 
-        <aside className={sidebarOpen ? "app-sidebar open" : "app-sidebar"} style={{
-          width: sidebarOpen ? 260 : 0,
-          minWidth: sidebarOpen ? 260 : 0,
-          background: T.bgSidebar,
-          borderRight: `1px solid ${T.border}`,
-          display: "flex",
-          flexDirection: "column",
-          overflow: "hidden",
-          transition: "width 0.2s ease, min-width 0.2s ease",
-          flexShrink: 0,
-        }}>
+          <aside className={sidebarOpen ? "app-sidebar open" : "app-sidebar"} style={{
+            width: sidebarOpen ? 260 : 0,
+            minWidth: sidebarOpen ? 260 : 0,
+            background: T.bgSidebar,
+            borderRight: `1px solid ${T.border}`,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+            transition: "width 0.2s ease, min-width 0.2s ease",
+            flexShrink: 0,
+            boxShadow: sidebarOpen ? (isDark ? "inset -1px 0 0 rgba(255,255,255,0.03)" : "inset -1px 0 0 rgba(255,255,255,0.7)") : "none",
+          }}>
           <div style={{ width: 260, display: "flex", flexDirection: "column", height: "100%" }}>
             {/* Sidebar header */}
-            <div style={{ padding: "14px 14px 10px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{
-                width: 30, height: 30, borderRadius: 9,
-                background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
-                display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-              }}>
-                <I.Bot />
-              </div>
-              <span style={{ fontWeight: 700, fontSize: 14, color: T.text, flex: 1 }}>Universal AI</span>
-            </div>
+                <div style={{ padding: "14px 14px 10px", borderBottom: `1px solid ${T.border}`, display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{
+                    width: 30, height: 30, borderRadius: 9,
+                    background: "linear-gradient(135deg, #b8c4d6, #6e809a)",
+                    display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+                    boxShadow: "0 10px 24px rgba(100,116,139,0.28)",
+                    color: "#fff",
+                  }}>
+                    <I.Bot />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ fontWeight: 700, fontSize: 14, color: T.text, display: "block" }}>Universal AI Platinum</span>
+                    <span style={{ fontSize: 11, color: T.textMuted }}>Premium workspace</span>
+                  </div>
+                </div>
+
 
             {/* New Chat button */}
             <div style={{ padding: "10px 12px 6px" }}>
@@ -1080,28 +1163,41 @@ export default function Page() {
           </div>
 
           {/* Right */}
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <button
-              onClick={() => setPublishOpen(true)}
-              style={{
-                display: "flex", alignItems: "center", gap: 5,
-                background: T.bgHover, color: T.textMuted, border: `1px solid ${T.border}`,
-                borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer",
-              }}
-            >
-              <I.Upload /><span>Publish</span>
-            </button>
-            <button
-              onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
-              style={iconBtnStyle}
-              title={isDark ? "Light mode" : "Dark mode"}
-            >
-              {isDark ? <I.Sun /> : <I.Moon />}
-            </button>
-            <button onClick={() => setSettingsOpen(true)} style={iconBtnStyle} title="Settings">
-              <I.Settings />
-            </button>
-          </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <a
+                href={`mailto:${SUPPORT_EMAIL}`}
+                style={{
+                  display: "inline-flex", alignItems: "center", gap: 6,
+                  textDecoration: "none",
+                  background: "linear-gradient(135deg, #c7d2e3, #778ba8)",
+                  color: "#fff", border: "none",
+                  borderRadius: 999, padding: "6px 12px", fontSize: 11, fontWeight: 700,
+                  boxShadow: "0 8px 20px rgba(71,85,105,0.28)",
+                }}
+              >
+                <I.Sparkle /><span>Premium Support</span>
+              </a>
+              <button
+                onClick={() => setPublishOpen(true)}
+                style={{
+                  display: "flex", alignItems: "center", gap: 5,
+                  background: T.bgHover, color: T.textMuted, border: `1px solid ${T.border}`,
+                  borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                }}
+              >
+                <I.Upload /><span>Publish</span>
+              </button>
+              <button
+                onClick={() => setTheme(t => t === "dark" ? "light" : "dark")}
+                style={iconBtnStyle}
+                title={isDark ? "Light mode" : "Dark mode"}
+              >
+                {isDark ? <I.Sun /> : <I.Moon />}
+              </button>
+              <button onClick={() => setSettingsOpen(true)} style={iconBtnStyle} title="Settings">
+                <I.Settings />
+              </button>
+            </div>
         </header>
 
         {/* ── Chat panel ── */}
@@ -1411,7 +1507,7 @@ export default function Page() {
       {settingsOpen && (
         <div style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.5)", backdropFilter: "blur(6px)", padding: 16 }}
           onClick={e => { if (e.target === e.currentTarget) setSettingsOpen(false); }}>
-          <div style={{ width: "100%", maxWidth: 640, maxHeight: "92vh", overflowY: "auto", background: T.bg, border: `1px solid ${T.border}`, borderRadius: 18, boxShadow: "0 24px 60px rgba(0,0,0,0.25)" }}>
+            <div style={{ ...premiumGlassStyle, width: "100%", maxWidth: 640, maxHeight: "92vh", overflowY: "auto", borderRadius: 18 }}>
             {/* Modal header */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "20px 24px 16px", borderBottom: `1px solid ${T.border}`, position: "sticky", top: 0, background: T.bg, borderRadius: "18px 18px 0 0", zIndex: 1 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1458,17 +1554,43 @@ export default function Page() {
                         </div>
                       </div>
 
-                    <div style={{ gridColumn: "span 2" }}>
-                      <label style={labelStyle}>Custom Model ID (optional)</label>
-                      <input value={customModelId} onChange={e => setCustomModelId(e.target.value)} placeholder="e.g. deepseek/deepseek-r1:free" style={{ ...inputStyle, fontFamily: "monospace" }} />
-                      <div style={{ marginTop: 4, fontSize: 11, color: T.textMuted }}>Optional override. Leave empty to use the selected model.</div>
+                      <div style={{ gridColumn: "span 2" }}>
+                        <label style={labelStyle}>Custom Model ID (optional)</label>
+                        <input value={customModelId} onChange={e => setCustomModelId(e.target.value)} placeholder="e.g. meta-llama/llama-3.2-3b-instruct:free" style={{ ...inputStyle, fontFamily: "monospace" }} />
+                        <div style={{ marginTop: 4, fontSize: 11, color: T.textMuted }}>Optional override. Leave empty to use the selected model.</div>
+                      </div>
+                        <div style={{ gridColumn: "span 2", fontSize: 11, color: T.textMuted }}>
+                          Chat responses stay inside Universal AI via API streaming. No external fallback tab is opened.
+                        </div>
+
                     </div>
+
+                </section>
+
+                {/* ── Support ── */}
+                <section style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: 14, padding: 18 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                    <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#94a3b8" }} />
+                    <span style={{ fontWeight: 700, fontSize: 14, color: T.text }}>Premium Support</span>
                   </div>
+                  <div style={{ display: "grid", gap: 8, fontSize: 12, color: T.textMuted }}>
+                    <div>
+                      Need help during launch? Contact us at{" "}
+                      <a href={`mailto:${SUPPORT_EMAIL}`} style={{ color: T.primary }}>{SUPPORT_EMAIL}</a>
+                    </div>
+                    <div>
+                      Provider status: <a href={STATUS_URL} target="_blank" rel="noreferrer" style={{ color: T.primary }}>OpenRouter status page</a>
+                    </div>
+                      <div>
+                        If a model is unavailable, Universal AI automatically retries using supported API models and keeps the chat in-app.
+                      </div>
 
-              </section>
+                  </div>
+                </section>
 
-              {/* ── System Prompts ── */}
-              <section style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: 14, padding: 18 }}>
+                {/* ── System Prompts ── */}
+                <section style={{ background: T.bgSurface, border: `1px solid ${T.border}`, borderRadius: 14, padding: 18 }}>
+
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
                   <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#8b5cf6" }} />
                   <span style={{ fontWeight: 700, fontSize: 14, color: T.text }}>System Prompts</span>
@@ -1491,7 +1613,7 @@ export default function Page() {
                     <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#10b981" }} />
                     <span style={{ fontWeight: 700, fontSize: 14, color: T.text }}>ChatGPT Codex</span>
                     <span style={{ marginLeft: "auto", fontSize: 11, color: codexAuthed ? T.success : T.textMuted, fontWeight: 600 }}>
-                      {codexAuthed ? "● Connected" : "● Not connected"}
+                      {codexAuthed ? "Connected" : "Not connected"}
                     </span>
                   </div>
                   <p style={{ fontSize: 12, color: T.textMuted, marginBottom: 12 }}>
@@ -1502,7 +1624,7 @@ export default function Page() {
                     <ol style={{ paddingLeft: 18, margin: "0 0 12px", color: T.textMuted, fontSize: 12, lineHeight: 1.9 }}>
                       <li>Enable <strong style={{ color: T.text }}>Device code authorization for Codex</strong> in your <a href="https://chat.openai.com/settings/security" target="_blank" rel="noreferrer" style={{ color: T.primary }}>ChatGPT Security Settings</a></li>
                       <li>Click <strong style={{ color: T.text }}>Connect</strong> below to get your code</li>
-                      <li>Enter the code at <a href="https://auth.openai.com/codex/device" target="_blank" rel="noreferrer" style={{ color: T.primary }}>auth.openai.com/codex/device</a></li>
+                      <li>Enter the full 9-character code (format: XXXX-XXXXX) at <a href="https://auth.openai.com/codex/device" target="_blank" rel="noreferrer" style={{ color: T.primary }}>auth.openai.com/codex/device</a></li>
                     </ol>
                   )}
 
@@ -1581,7 +1703,7 @@ export default function Page() {
       {publishOpen && (
         <div style={{ position: "fixed", inset: 0, zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.5)", backdropFilter: "blur(6px)", padding: 16 }}
           onClick={e => { if (e.target === e.currentTarget) setPublishOpen(false); }}>
-          <div style={{ width: "100%", maxWidth: 480, background: T.bg, border: `1px solid ${T.border}`, borderRadius: 18, boxShadow: "0 24px 60px rgba(0,0,0,0.25)" }}>
+            <div style={{ ...premiumGlassStyle, width: "100%", maxWidth: 480, borderRadius: 18 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "20px 24px 16px", borderBottom: `1px solid ${T.border}` }}>
               <div>
                 <div style={{ fontWeight: 700, fontSize: 16, color: T.text }}>Publish to Vercel</div>

@@ -1,27 +1,23 @@
 import type { NextConfig } from "next";
-import path from "node:path";
 
-const LOADER = path.resolve(__dirname, "src/visual-edits/component-tagger-loader.js");
-const PYTHON_BACKEND_URL = process.env.PYTHON_BACKEND_URL ?? "http://127.0.0.1:8001";
+const PYTHON_BACKEND_URL = process.env.PYTHON_BACKEND_URL ?? "http://127.0.0.1:8000";
+const isLocalBackend = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(PYTHON_BACKEND_URL);
 
 const nextConfig: NextConfig = {
   images: {
     remotePatterns: [
-      {
-        protocol: "https",
-        hostname: "**",
-      },
-      {
-        protocol: "http",
-        hostname: "**",
-      },
+      { protocol: "https", hostname: "**" },
+      { protocol: "http", hostname: "**" },
     ],
   },
-  outputFileTracingRoot: path.resolve(__dirname, "../../"),
   typescript: {
     ignoreBuildErrors: true,
   },
   async rewrites() {
+    if (process.env.VERCEL === "1" && isLocalBackend) {
+      return [];
+    }
+
     return [
       {
         source: "/py/:path*",
@@ -29,14 +25,6 @@ const nextConfig: NextConfig = {
       },
     ];
   },
-  turbopack: {
-    rules: {
-      "*.{jsx,tsx}": {
-        loaders: [LOADER],
-      },
-    },
-  },
 };
 
 export default nextConfig;
-// Orchids restart: 1771948451608
